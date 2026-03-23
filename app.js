@@ -234,7 +234,7 @@ class ClearNano {
 
           // Convert to blob
           const blob = await new Promise((res) =>
-            canvas.toBlob(res, "image/png")
+            canvas.toBlob(res, "image/jpeg", 0.92)
           );
           const processedUrl = URL.createObjectURL(blob);
 
@@ -484,7 +484,7 @@ class ClearNano {
     const nameParts = result.filename.split(".");
     const ext = nameParts.pop();
     const baseName = nameParts.join(".");
-    link.download = `${baseName}_clean.png`;
+    link.download = `${baseName}_clean.jpg`;
 
     document.body.appendChild(link);
     link.click();

@@ -5,13 +5,68 @@
  * Formula: Pixel_original = (Pixel_final - (α * Pixel_logo)) / (1 - α)
  */
 
+/**
+ * Official Gemini image size catalog mapped to watermark configs.
+ * Updated to reflect changes as of 2026-06 (v1.0.15–v1.0.17):
+ *   - gemini-3.x-image 1k tier  → 48px logo, 32px margin
+ *   - gemini-3.x-image 2k tier  → 96px logo, 64px margin
+ *   - 2816×1536 (2k-new-margin)  → 96px logo, 192px margin, new alpha map
+ *   - 1408×768 (fixed variant)   → 48px logo, 32px margin (46px actual, approximate)
+ *   - gemini-2.5-flash-image 1k  → 48px logo, 32px margin
+ */
+const OFFICIAL_SIZE_CONFIGS = (() => {
+  const m = new Map();
+  const add = (w, h, size, margin, maskKey) =>
+    m.set(`${w}x${h}`, { size, margin, maskKey: maskKey || size });
+
+  // 0.5k tier — 48px logo, margin 32
+  for (const [w, h] of [
+    [512,512],[256,1024],[192,1536],[424,632],[632,424],
+    [448,600],[1024,256],[600,448],[464,576],[576,464],
+    [1536,192],[384,688],[688,384],[792,168]
+  ]) add(w, h, 48, 32);
+
+  // 1k tier — 48px logo, margin 32
+  for (const [w, h] of [
+    [1024,1024],[512,2048],[384,3072],[848,1264],[1264,848],
+    [896,1200],[1200,896],[928,1152],[1152,928],[3072,384],
+    [768,1376],[1376,768],[1584,672]
+  ]) add(w, h, 48, 32);
+  add(1408, 768, 48, 32); // fixed: exact logo is 46px, 48px mask used as approximation
+
+  // 2k tier — 96px logo, margin 64
+  for (const [w, h] of [
+    [2048,2048],[1024,4096],[768,6144],[1696,2528],[2528,1696],
+    [1792,2400],[4096,1024],[2400,1792],[1856,2304],[2304,1856],
+    [6144,768],[1536,2752],[2752,1536],[3168,1344]
+  ]) add(w, h, 96, 64);
+  // 2k-new-margin: 2816×1536 uses 192px margin and updated alpha map (since 2026-05-20)
+  add(2816, 1536, 96, 192, '96_20260520');
+
+  // 4k tier — 96px logo, margin 64
+  for (const [w, h] of [
+    [4096,4096],[2048,8192],[1536,12288],[3392,5056],[5056,3392],
+    [3584,4800],[8192,2048],[4800,3584],[3712,4608],[4608,3712],
+    [12288,1536],[3072,5504],[5504,3072],[6336,2688]
+  ]) add(w, h, 96, 64);
+
+  // gemini-2.5-flash-image 1k — 48px logo, margin 32
+  for (const [w, h] of [
+    [832,1248],[1248,832],[864,1184],[1184,864],
+    [768,1344],[1344,768],[1536,672]
+  ]) add(w, h, 48, 32);
+
+  return m;
+})();
+
 class ClearNano {
   constructor() {
-    // Watermark mask configurations
-    // The masks are white logos with alpha transparency
+    // Watermark mask configurations.
+    // bg_96_20260520.png is the updated alpha map for 2816×1536 (2k-new-margin, since 2026-05-20).
     this.masks = {
       48: { path: "assets/bg_48.png", size: 48 },
       96: { path: "assets/bg_96.png", size: 96 },
+      '96_20260520': { path: "assets/bg_96_20260520.png", size: 96 },
     };
 
     // Loaded mask data
@@ -53,7 +108,7 @@ class ClearNano {
   }
 
   async loadMasks() {
-    for (const [size, config] of Object.entries(this.masks)) {
+    for (const [key, config] of Object.entries(this.masks)) {
       try {
         const img = new Image();
         img.crossOrigin = "anonymous";
@@ -64,7 +119,6 @@ class ClearNano {
           img.src = config.path;
         });
 
-        // Create canvas and get image data
         const canvas = document.createElement("canvas");
         canvas.width = config.size;
         canvas.height = config.size;
@@ -72,15 +126,15 @@ class ClearNano {
         ctx.drawImage(img, 0, 0);
 
         const imageData = ctx.getImageData(0, 0, config.size, config.size);
-        this.loadedMasks[size] = {
+        this.loadedMasks[key] = {
           data: imageData.data,
           width: config.size,
           height: config.size,
         };
 
-        console.log(`Loaded mask: ${size}x${size}`);
+        console.log(`Loaded mask: ${key} (${config.size}x${config.size})`);
       } catch (error) {
-        console.error(`Failed to load mask ${size}:`, error);
+        console.error(`Failed to load mask ${key}:`, error);
       }
     }
   }
@@ -204,8 +258,17 @@ class ClearNano {
           ctx.drawImage(img, 0, 0);
 
           // Determine watermark config based on image resolution
-          const watermarkConfig = this.getWatermarkConfig(img.naturalWidth, img.naturalHeight);
-          const mask = this.loadedMasks[watermarkConfig.size];
+          let watermarkConfig = this.getWatermarkConfig(img.naturalWidth, img.naturalHeight);
+
+          // For 1k-tier images (48px/32px default), also detect the large-margin
+          // variant (48px at 96px margin) introduced in 2026-06 for some Gemini outputs.
+          if (watermarkConfig.size === 48 && watermarkConfig.margin === 32) {
+            watermarkConfig = this.detectBestMarginConfig(
+              ctx, img.naturalWidth, img.naturalHeight, watermarkConfig
+            );
+          }
+
+          const mask = this.loadedMasks[watermarkConfig.maskKey || watermarkConfig.size];
 
           if (!mask) {
             throw new Error(
@@ -246,6 +309,7 @@ class ClearNano {
             width: img.naturalWidth,
             height: img.naturalHeight,
             maskSize: watermarkConfig.size,
+            margin: watermarkConfig.margin,
             error: null,
           });
         } catch (error) {
@@ -260,15 +324,73 @@ class ClearNano {
 
   getWatermarkConfig(width, height) {
     /**
-     * Gemini watermark positioning rules (from GeminiWatermarkTool):
-     * - Large (96x96): BOTH width AND height must be > 1024px, margin = 64px
-     * - Small (48x48): All other cases, margin = 32px
+     * Watermark positioning rules (updated 2026-06):
+     *
+     * 1. Exact official Gemini sizes are looked up from OFFICIAL_SIZE_CONFIGS.
+     *    - gemini-3.x 1k tier  (e.g. 1024×1024, 1376×768) → 48px / margin 32px
+     *    - gemini-3.x 2k tier  (e.g. 2048×2048)            → 96px / margin 64px
+     *    - 2816×1536 (2k-new-margin, since 2026-05-20)      → 96px / margin 192px
+     *    - gemini-2.5-flash 1k (e.g. 1344×768)             → 48px / margin 32px
+     *
+     * 2. Non-catalog sizes fall back to the historical heuristic:
+     *    - Both dims > 1024 → 96px / margin 64px
+     *    - Otherwise        → 48px / margin 32px
+     *
+     * Note: For 1k images, an additional large-margin variant (48px / margin 96px)
+     * exists in newer Gemini outputs (since 2026-06-07). It is auto-detected via
+     * detectBestMarginConfig() after this method returns.
      */
+    const key = `${width}x${height}`;
+    const official = OFFICIAL_SIZE_CONFIGS.get(key);
+    if (official) return { ...official };
+
     if (width > 1024 && height > 1024) {
-      return { size: 96, margin: 64 };
-    } else {
-      return { size: 48, margin: 32 };
+      return { size: 96, margin: 64, maskKey: 96 };
     }
+    return { size: 48, margin: 32, maskKey: 48 };
+  }
+
+  /**
+   * For 1k-tier images, Gemini sometimes places the 48px watermark at a 96px
+   * margin instead of 32px (observed since 2026-06-07).
+   * Detect the better position by comparing mask-weighted mean brightness:
+   * the region with the watermark will be brighter on average.
+   */
+  detectBestMarginConfig(ctx, imageWidth, imageHeight, defaultConfig) {
+    const largeMarginConfig = { ...defaultConfig, margin: 96 };
+    const candidates = [defaultConfig, largeMarginConfig];
+
+    const mask = this.loadedMasks[defaultConfig.maskKey || defaultConfig.size];
+    if (!mask) return defaultConfig;
+
+    let bestConfig = defaultConfig;
+    let bestScore = -Infinity;
+
+    for (const candidate of candidates) {
+      const startX = imageWidth - candidate.margin - candidate.size;
+      const startY = imageHeight - candidate.margin - candidate.size;
+      if (startX < 0 || startY < 0) continue;
+
+      const region = ctx.getImageData(startX, startY, candidate.size, candidate.size);
+      let weightedSum = 0;
+      let totalWeight = 0;
+
+      for (let i = 0; i < region.data.length; i += 4) {
+        const maskAlpha = Math.max(mask.data[i], mask.data[i + 1], mask.data[i + 2]) / 255;
+        if (maskAlpha < 0.1) continue;
+        const brightness = (region.data[i] + region.data[i + 1] + region.data[i + 2]) / 3;
+        weightedSum += brightness * maskAlpha;
+        totalWeight += maskAlpha;
+      }
+
+      const score = totalWeight > 0 ? weightedSum / totalWeight : 0;
+      if (score > bestScore) {
+        bestScore = score;
+        bestConfig = candidate;
+      }
+    }
+
+    return bestConfig;
   }
 
   reverseAlphaBlend(imageData, mask) {
@@ -377,7 +499,7 @@ class ClearNano {
                             <svg viewBox="0 0 24 24" fill="none" width="14" height="14" xmlns="http://www.w3.org/2000/svg">
                                 <path d="M20 6L9 17L4 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                             </svg>
-                            ${result.maskSize}px mask
+                            ${result.maskSize}px / ${result.margin}px margin
                         </span>
                     `
                         : `

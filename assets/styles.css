@@ -762,3 +762,49 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+/* ── Output format toggle ─────────────────────────────────────────────────── */
+.format-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-md);
+}
+
+.format-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.format-toggle {
+  display: flex;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 3px;
+  gap: 2px;
+}
+
+.format-btn {
+  padding: 4px 14px;
+  border: none;
+  border-radius: calc(var(--radius-lg) - 3px);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  cursor: pointer;
+  background: transparent;
+  color: var(--color-text-secondary);
+  transition: background 0.15s, color 0.15s;
+}
+
+.format-btn:hover {
+  color: var(--color-text-primary);
+}
+
+.format-btn.active {
+  background: var(--gradient-accent);
+  color: #fff;
+  box-shadow: var(--shadow-sm);
+}

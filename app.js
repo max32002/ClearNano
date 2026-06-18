@@ -14,6 +14,8 @@
  *   7. Mask load failure gracefully falls back to same-size standard mask
  */
 
+const VERSION = '1.0.0';
+
 /**
  * Official Gemini image size catalog mapped to watermark configs.
  * Updated to reflect changes as of 2026-06 (v1.0.15–v1.0.17):
@@ -121,7 +123,9 @@ class ClearNano {
     await this.loadMasks();
     this.initWorker();
     this.setupEventListeners();
-    console.log("ClearNano initialized successfully");
+    const badge = document.getElementById('versionBadge');
+    if (badge) badge.textContent = `v${VERSION}`;
+    console.log(`ClearNano v${VERSION} initialized successfully`);
   }
 
   // ---------------------------------------------------------------------------

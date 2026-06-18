@@ -88,6 +88,9 @@ class ClearNano {
     // Output format: 'image/jpeg' (default) or 'image/png'
     this.outputFormat = "image/jpeg";
 
+    // Theme: 'auto' | 'light' | 'dark'
+    this.currentTheme = 'auto';
+
     // Processed images storage
     this.processedImages = [];
 
@@ -114,10 +117,42 @@ class ClearNano {
   }
 
   async init() {
+    this.initTheme();
     await this.loadMasks();
     this.initWorker();
     this.setupEventListeners();
     console.log("ClearNano initialized successfully");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Theme management
+  // ---------------------------------------------------------------------------
+
+  initTheme() {
+    const saved = localStorage.getItem('cn-theme');
+    this.setTheme(saved || 'auto', false);
+
+    // Listen for system preference changes (only matters in 'auto' mode)
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      if (this.currentTheme === 'auto') this.applyThemeClass('auto');
+    });
+  }
+
+  setTheme(value, save = true) {
+    this.currentTheme = value;
+    if (save) localStorage.setItem('cn-theme', value);
+    this.applyThemeClass(value);
+    document.querySelectorAll('.theme-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.themeValue === value);
+    });
+  }
+
+  applyThemeClass(value) {
+    const root = document.documentElement;
+    root.classList.remove('light-theme', 'dark-theme');
+    if (value === 'light') root.classList.add('light-theme');
+    if (value === 'dark')  root.classList.add('dark-theme');
+    // 'auto' → no class; CSS media query handles it
   }
 
   // ---------------------------------------------------------------------------
@@ -286,6 +321,13 @@ class ClearNano {
       document.querySelectorAll(".format-btn").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       this.outputFormat = btn.dataset.format;
+    });
+
+    // Theme toggle
+    document.getElementById("themeToggle").addEventListener("click", (e) => {
+      const btn = e.target.closest(".theme-btn");
+      if (!btn) return;
+      this.setTheme(btn.dataset.themeValue);
     });
   }
 

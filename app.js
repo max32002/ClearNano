@@ -12,63 +12,17 @@
  *   5. Parallel batch processing (up to 4 images concurrently)
  *   6. Output format preserved: PNG→PNG, WebP→WebP, JPEG→JPEG
  *   7. Mask load failure gracefully falls back to same-size standard mask
+ *
+ * Watermark size/config rules (which sizes map to which logo/margin/alpha
+ * variant) are NOT hand-maintained here anymore. They live in
+ * vendor/geminiSizeCatalog.js, vendored verbatim from
+ * https://github.com/GargantuaX/gemini-watermark-remover (src/core/geminiSizeCatalog.js).
+ * See that file's header comment for upgrade instructions — future rule
+ * changes upstream should only require replacing that one file, not editing
+ * detection logic in app.js.
  */
 
 const VERSION = '1.0.0';
-
-/**
- * Official Gemini image size catalog mapped to watermark configs.
- * Updated to reflect changes as of 2026-06 (v1.0.15–v1.0.17):
- *   - gemini-3.x-image 1k tier  → 48px logo, 32px margin
- *   - gemini-3.x-image 2k tier  → 96px logo, 64px margin
- *   - 2816×1536 (2k-new-margin)  → 96px logo, 192px margin, new alpha map
- *   - 1408×768 (fixed variant)   → 48px logo, 32px margin (46px actual, approximate)
- *   - gemini-2.5-flash-image 1k  → 48px logo, 32px margin
- */
-const OFFICIAL_SIZE_CONFIGS = (() => {
-  const m = new Map();
-  const add = (w, h, size, margin, maskKey) =>
-    m.set(`${w}x${h}`, { size, margin, maskKey: maskKey || size });
-
-  // 0.5k tier — 48px logo, margin 32
-  for (const [w, h] of [
-    [512,512],[256,1024],[192,1536],[424,632],[632,424],
-    [448,600],[1024,256],[600,448],[464,576],[576,464],
-    [1536,192],[384,688],[688,384],[792,168]
-  ]) add(w, h, 48, 32);
-
-  // 1k tier — 48px logo, margin 32
-  for (const [w, h] of [
-    [1024,1024],[512,2048],[384,3072],[848,1264],[1264,848],
-    [896,1200],[1200,896],[928,1152],[1152,928],[3072,384],
-    [768,1376],[1376,768],[1584,672]
-  ]) add(w, h, 48, 32);
-  add(1408, 768, 48, 32); // fixed: exact logo is 46px, 48px mask used as approximation
-
-  // 2k tier — 96px logo, margin 64
-  for (const [w, h] of [
-    [2048,2048],[1024,4096],[768,6144],[1696,2528],[2528,1696],
-    [1792,2400],[4096,1024],[2400,1792],[1856,2304],[2304,1856],
-    [6144,768],[1536,2752],[2752,1536],[3168,1344]
-  ]) add(w, h, 96, 64);
-  // 2k-new-margin: 2816×1536 uses 192px margin and updated alpha map (since 2026-05-20)
-  add(2816, 1536, 96, 192, '96_20260520');
-
-  // 4k tier — 96px logo, margin 64
-  for (const [w, h] of [
-    [4096,4096],[2048,8192],[1536,12288],[3392,5056],[5056,3392],
-    [3584,4800],[8192,2048],[4800,3584],[3712,4608],[4608,3712],
-    [12288,1536],[3072,5504],[5504,3072],[6336,2688]
-  ]) add(w, h, 96, 64);
-
-  // gemini-2.5-flash-image 1k — 48px logo, margin 32
-  for (const [w, h] of [
-    [832,1248],[1248,832],[864,1184],[1184,864],
-    [768,1344],[1344,768],[1536,672]
-  ]) add(w, h, 48, 32);
-
-  return m;
-})();
 
 class ClearNano {
   constructor() {
@@ -491,110 +445,112 @@ class ClearNano {
   // Watermark config detection
   // ---------------------------------------------------------------------------
 
+  /**
+   * Map a vendored-catalog config ({logoSize, marginRight, marginBottom,
+   * alphaVariant?, fixedVariant?}) onto ClearNano's own mask lookup shape
+   * ({size, margin, maskKey}). This is the ONLY place that needs to know
+   * about the mapping between upstream's config shape and our mask assets —
+   * see vendor/geminiSizeCatalog.js for the actual watermark rules.
+   */
+  mapCatalogConfigToMask(config) {
+    if (!config) return null;
+
+    let maskKey;
+    if (config.alphaVariant === '20260520') maskKey = '96_20260520';
+    else if (config.alphaVariant === 'v2') maskKey = '36_v2';
+    else maskKey = config.logoSize; // e.g. 48, 96, or the 46px fixed-variant approximated via 48
+
+    // The 1408x768 fixed variant reports an exact 46px logo, but we only ship
+    // a 48px mask asset — approximate with the closest mask we have.
+    if (config.fixedVariant && !this.loadedMasks[maskKey]) maskKey = 48;
+
+    return { size: config.logoSize, margin: config.marginRight, maskKey };
+  }
+
   getWatermarkConfig(width, height) {
     /**
      * Priority order:
-     * 1. Exact official Gemini size catalog
-     * 2. Near-official projection (scaled non-catalog dimensions)
-     * 3. Historical heuristic fallback
+     * 1. Exact official Gemini size catalog (vendor/geminiSizeCatalog.js)
+     * 2. Historical heuristic fallback (used as the search seed for
+     *    detectBestConfig's near-official projection / variant candidates)
      */
-    const official = OFFICIAL_SIZE_CONFIGS.get(`${width}x${height}`);
-    if (official) return { ...official };
+    const official = window.GeminiSizeCatalog.resolveOfficialGeminiWatermarkConfig(width, height);
+    const catalogConfig = official ||
+      (width > 1024 && height > 1024
+        ? { logoSize: 96, marginRight: 64, marginBottom: 64 }
+        : { logoSize: 48, marginRight: 32, marginBottom: 32 });
 
-    const projected = this.projectNearOfficialConfig(width, height);
-    if (projected) return projected;
-
-    if (width > 1024 && height > 1024) return { size: 96, margin: 64,  maskKey: 96 };
-    return                                       { size: 48, margin: 32,  maskKey: 48 };
+    // Keep the original upstream-shaped config attached so detectBestConfig
+    // can hand it straight back to the catalog as the search seed, without
+    // losing fields like alphaVariant when round-tripping through our own
+    // {size, margin, maskKey} shape.
+    return { ...this.mapCatalogConfigToMask(catalogConfig), catalogConfig };
   }
 
   /**
-   * For non-catalog sizes (screenshots, compressed exports, etc.), find the
-   * closest official size by aspect ratio and project the margin proportionally.
-   * Mirrors the near-official projection logic in upstream geminiSizeCatalog.js.
-   */
-  projectNearOfficialConfig(width, height) {
-    const targetRatio   = width / height;
-    const MAX_RATIO_DELTA  = 0.02;
-    const MAX_SCALE_MISMATCH = 0.12;
-
-    let best = null;
-    let bestScore = Infinity;
-
-    for (const [key, config] of OFFICIAL_SIZE_CONFIGS) {
-      const [ow, oh]    = key.split("x").map(Number);
-      const entryRatio  = ow / oh;
-      const ratioDelta  = Math.abs(targetRatio - entryRatio) / entryRatio;
-      if (ratioDelta > MAX_RATIO_DELTA) continue;
-
-      const scaleX       = width  / ow;
-      const scaleY       = height / oh;
-      const scaleMismatch = Math.abs(scaleX - scaleY) / Math.max(scaleX, scaleY);
-      if (scaleMismatch > MAX_SCALE_MISMATCH) continue;
-
-      const avgScale = (scaleX + scaleY) / 2;
-      const score    = ratioDelta * 100 + scaleMismatch * 20
-                     + Math.abs(Math.log2(Math.max(avgScale, 1e-6)));
-      if (score < bestScore) {
-        bestScore = score;
-        best = { config, scaleX, scaleY };
-      }
-    }
-
-    if (!best) return null;
-
-    const { config, scaleX, scaleY } = best;
-    const margin = Math.max(8, Math.round(config.margin * (scaleX + scaleY) / 2));
-    return { size: config.size, margin, maskKey: config.maskKey || config.size };
-  }
-
-  /**
-   * Build candidate watermark configs for a given image, then pick the best one
-   * via Pearson spatial correlation between the candidate region and the mask.
+   * Build candidate watermark configs for a given image via the vendored
+   * upstream catalog (vendor/geminiSizeCatalog.js), then pick the best one
+   * via Pearson spatial correlation between each candidate region and its mask.
    *
-   * Candidates tested (for 48px-tier images):
-   *   a) Standard:      48px logo, 32px margin
-   *   b) Large-margin:  48px logo, 96px margin  (observed since 2026-06-07)
-   *   c) v2-small:      36px logo, 96px margin  (v2 variant)
+   * `resolveGeminiWatermarkSearchCatalogEntries` already covers: the exact
+   * catalog match (with all its known variants — large-margin, v2-small,
+   * legacy, and the evidence-gated 192px new-margin anchor), near-official
+   * projection for non-catalog dimensions, and unknown-size fallback
+   * variants. Candidates whose logoSize doesn't match a mask asset we ship
+   * (e.g. an arbitrarily-scaled projected size) are simply skipped below —
+   * this keeps upgrades to the vendored catalog safe without touching this
+   * detection logic.
+   *
+   * Candidates are ranked by spatial-correlation score, with a small bias
+   * toward each candidate's upstream `sourcePriority` (lower = more
+   * canonical/preferred), so a secondary/variant anchor only wins when it
+   * shows clearly stronger evidence than the canonical one.
    */
   detectBestConfig(ctx, imageWidth, imageHeight) {
     const defaultConfig = this.getWatermarkConfig(imageWidth, imageHeight);
-    if (defaultConfig.size > 48) return defaultConfig; // 96px configs are exact-match only
 
-    const candidates = [defaultConfig];
+    const entries = window.GeminiSizeCatalog.resolveGeminiWatermarkSearchCatalogEntries(
+      imageWidth, imageHeight, defaultConfig.catalogConfig
+    );
 
-    // Large-margin variant
-    const largeMargin = { size: 48, margin: 96, maskKey: 48 };
-    if (imageWidth - 96 - 48 >= 0 && imageHeight - 96 - 48 >= 0) {
-      candidates.push(largeMargin);
-    }
+    const candidates = [];
+    const seen = new Set();
+    for (const entry of entries) {
+      const candidate = this.mapCatalogConfigToMask(entry.config);
+      if (!candidate) continue;
 
-    // v2-small variant (36px mask generated from 48px at runtime)
-    if (this.loadedMasks["36_v2"]) {
-      const v2Small = { size: 36, margin: 96, maskKey: "36_v2" };
-      if (imageWidth - 96 - 36 >= 0 && imageHeight - 96 - 36 >= 0) {
-        candidates.push(v2Small);
-      }
-    }
-
-    if (candidates.length === 1) return defaultConfig;
-
-    let bestConfig = defaultConfig;
-    let bestScore  = -Infinity;
-
-    for (const candidate of candidates) {
-      const mask = this.loadedMasks[candidate.maskKey || candidate.size];
-      if (!mask) continue;
+      const mask = this.loadedMasks[candidate.maskKey];
+      if (!mask) continue; // no matching mask asset for this candidate — skip
 
       const sx = imageWidth  - candidate.margin - candidate.size;
       const sy = imageHeight - candidate.margin - candidate.size;
       if (sx < 0 || sy < 0) continue;
 
+      const key = `${candidate.size}:${candidate.margin}:${candidate.maskKey}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      candidates.push({ ...candidate, priority: entry.metadata?.sourcePriority ?? 9 });
+    }
+
+    if (candidates.length === 0) return defaultConfig;
+    if (candidates.length === 1) return candidates[0];
+
+    const PRIORITY_BIAS = 0.03;
+    let bestConfig = candidates[0];
+    let bestEffectiveScore = -Infinity;
+
+    for (const candidate of candidates) {
+      const mask = this.loadedMasks[candidate.maskKey];
+      const sx = imageWidth  - candidate.margin - candidate.size;
+      const sy = imageHeight - candidate.margin - candidate.size;
+
       const region = ctx.getImageData(sx, sy, candidate.size, candidate.size);
       const score  = this.computeSpatialCorrelation(region.data, mask.data);
+      const effectiveScore = score - candidate.priority * PRIORITY_BIAS;
 
-      if (score > bestScore) {
-        bestScore  = score;
+      if (effectiveScore > bestEffectiveScore) {
+        bestEffectiveScore = effectiveScore;
         bestConfig = candidate;
       }
     }

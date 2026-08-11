@@ -7,22 +7,22 @@
  * Optimisations applied:
  *   1. Spatial-correlation (Pearson) replaces brightness heuristic for config detection
  *   2. Near-official size projection for non-catalog dimensions
- *   3. v2 small variant support (36px logo) — mask generated at runtime
+ *   3. v2 small variant support (exact 36px mask plus resized 24px profile)
  *   4. Web Worker offloads reverseAlphaBlend off the main thread
  *   5. Parallel batch processing (up to 4 images concurrently)
  *   6. Output format preserved: PNG→PNG, WebP→WebP, JPEG→JPEG
  *   7. Mask load failure gracefully falls back to same-size standard mask
  *
  * Watermark size/config rules (which sizes map to which logo/margin/alpha
- * variant) are NOT hand-maintained here anymore. They live in
- * vendor/geminiSizeCatalog.js, vendored verbatim from
+ * variant) are NOT hand-maintained here anymore. The upstream catalog lives
+ * in vendor/geminiSizeCatalog.js, vendored verbatim from
  * https://github.com/GargantuaX/gemini-watermark-remover (src/core/geminiSizeCatalog.js).
- * See that file's header comment for upgrade instructions — future rule
- * changes upstream should only require replacing that one file, not editing
- * detection logic in app.js.
+ * See that file's header comment for upgrade instructions. app.js also keeps
+ * a narrow compatibility profile for resized 1k exports not represented by
+ * the upstream catalog.
  */
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 class ClearNano {
   constructor() {
@@ -32,6 +32,7 @@ class ClearNano {
       48: { path: "assets/bg_48.png", size: 48 },
       96: { path: "assets/bg_96.png", size: 96 },
       '96_20260520': { path: "assets/bg_96_20260520.png", size: 96 },
+      '36_v2': { path: "assets/bg_36_v2.png", size: 36 },
     };
 
     // Loaded mask data (keyed by maskKey string/number)
@@ -151,11 +152,18 @@ class ClearNano {
       }
     }
 
-    // Generate 36px v2 mask at runtime by scaling down the 48px mask.
-    // Used for the v2-small watermark variant (logoSize 36, margin ~96px).
-    if (this.loadedMasks[48]) {
-      const scaled = this.generateScaledMask(48, 36);
-      if (scaled) this.loadedMasks['36_v2'] = scaled;
+    // Keep a conservative fallback for older deployments missing the exact
+    // upstream asset, then derive the resized profile used by 1k exports.
+    if (!this.loadedMasks['36_v2'] && this.loadedMasks[48]) {
+      const fallback = this.generateScaledMask(48, 36);
+      if (fallback) {
+        this.loadedMasks['36_v2'] = fallback;
+        console.warn('Exact 36-v2 mask unavailable — using scaled 48px fallback');
+      }
+    }
+    if (this.loadedMasks['36_v2']) {
+      const resized = this.generateScaledMask('36_v2', 24);
+      if (resized) this.loadedMasks['24_v2'] = resized;
     }
   }
 
@@ -458,6 +466,7 @@ class ClearNano {
     let maskKey;
     if (config.alphaVariant === '20260520') maskKey = '96_20260520';
     else if (config.alphaVariant === 'v2') maskKey = '36_v2';
+    else if (config.alphaVariant === 'v2-resized') maskKey = '24_v2';
     else maskKey = config.logoSize; // e.g. 48, 96, or the 46px fixed-variant approximated via 48
 
     // The 1408x768 fixed variant reports an exact 46px logo, but we only ship
@@ -485,6 +494,25 @@ class ClearNano {
     // losing fields like alphaVariant when round-tripping through our own
     // {size, margin, maskKey} shape.
     return { ...this.mapCatalogConfigToMask(catalogConfig), catalogConfig };
+  }
+
+  /**
+   * A 1376×768 export can be a resized v2 image whose 36px source mark is
+   * reduced to 24px. This profile is intentionally narrow so it only wins
+   * when its exact footprint is present.
+   */
+  getResizedWatermarkCandidates(imageWidth, imageHeight) {
+    const key = `${imageWidth}x${imageHeight}`;
+    if (key !== '1376x768' && key !== '768x1376') return [];
+    if (!this.loadedMasks['24_v2']) return [];
+
+    return [{
+      size: 24,
+      margin: 48,
+      maskKey: '24_v2',
+      priority: 1,
+      minimumScore: 0.65,
+    }];
   }
 
   /**
@@ -532,6 +560,19 @@ class ClearNano {
 
       candidates.push({ ...candidate, priority: entry.metadata?.sourcePriority ?? 9 });
     }
+    for (const candidate of this.getResizedWatermarkCandidates(imageWidth, imageHeight)) {
+      const mask = this.loadedMasks[candidate.maskKey];
+      if (!mask) continue;
+
+      const sx = imageWidth - candidate.margin - candidate.size;
+      const sy = imageHeight - candidate.margin - candidate.size;
+      if (sx < 0 || sy < 0) continue;
+
+      const key = `${candidate.size}:${candidate.margin}:${candidate.maskKey}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      candidates.push(candidate);
+    }
 
     if (candidates.length === 0) return defaultConfig;
     if (candidates.length === 1) return candidates[0];
@@ -547,6 +588,9 @@ class ClearNano {
 
       const region = ctx.getImageData(sx, sy, candidate.size, candidate.size);
       const score  = this.computeSpatialCorrelation(region.data, mask.data);
+      if (candidate.minimumScore != null && score < candidate.minimumScore) {
+        continue;
+      }
       const effectiveScore = score - candidate.priority * PRIORITY_BIAS;
 
       if (effectiveScore > bestEffectiveScore) {

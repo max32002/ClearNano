@@ -3,7 +3,8 @@
  *
  * Source:  https://github.com/GargantuaX/gemini-watermark-remover
  *          src/core/geminiSizeCatalog.js
- * Upstream version synced: v1.0.31 (2026-07-18)
+ * Upstream version verified: v1.0.37 (2026-08-10)
+ * Current catalog SHA: b744e3c (main, 2026-08-11)
  *
  * HOW TO UPGRADE THIS FILE:
  *   1. Fetch the latest src/core/geminiSizeCatalog.js from the upstream repo.

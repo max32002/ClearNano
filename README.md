@@ -104,6 +104,7 @@ ClearNano 採用完整的官方尺寸目錄進行精確比對，無法比對時�
 | 1k 系列（如 1024×1024） | 48px | 32px | 32px | bg_48 |
 | 2k 系列（如 2048×2048） | 96px | 64px | 64px | bg_96 |
 | **2816×1536**（新邊距，2026-05 起） | 96px | 192px | 192px | bg_96_20260520 |
+| **1376×768 resized v2** | 24px | 48px | 48px | bg_36_v2 → 24px |
 | 4k 系列（如 4096×4096） | 96px | 64px | 64px | bg_96 |
 | Gemini 2.5 Flash 1k 系列 | 48px | 32px | 32px | bg_48 |
 
@@ -125,7 +126,7 @@ Pixel_original = (Pixel_final - α × 255) / (1 - α)
 - `α`：遮罩 PNG 在該位置的 Alpha 值（0.0 ~ 1.0）
 - `Pixel_original`：還原後的原始像素值
 
-ClearNano 讀取對應的遮罩 PNG（`assets/bg_48.png`、`assets/bg_96.png`、`assets/bg_96_20260520.png`），逐像素套用此公式，計算由 Web Worker 非同步執行以避免介面凍結。
+ClearNano 讀取對應的遮罩 PNG（`assets/bg_48.png`、`assets/bg_96.png`、`assets/bg_96_20260520.png`、`assets/bg_36_v2.png`），逐像素套用此公式，計算由 Web Worker 非同步執行以避免介面凍結。需要時，36px v2 遮罩會在瀏覽器內縮放為 24px resized profile。
 
 ---
 
@@ -141,6 +142,7 @@ ClearNano/
 │   ├── bg_48.png            # 48px 浮水印遮罩
 │   ├── bg_96.png            # 96px 浮水印遮罩
 │   ├── bg_96_20260520.png   # 96px 新邊距遮罩（2816×1536 專用）
+│   ├── bg_36_v2.png         # upstream exact 36px v2 遮罩
 │   └── favicon-128.png      # 網站圖示
 └── workers/
     └── watermark-worker.js  # Web Worker（反向 Alpha 混合計算）

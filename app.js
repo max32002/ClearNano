@@ -22,7 +22,8 @@
  * the upstream catalog.
  */
 
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
+const MIN_WATERMARK_CORRELATION = 0.15;
 
 class ClearNano {
   constructor() {
@@ -392,6 +393,36 @@ class ClearNano {
           // Resolve best watermark config using spatial correlation
           const watermarkConfig = this.detectBestConfig(ctx, img.naturalWidth, img.naturalHeight);
 
+          const detectionScore = watermarkConfig.detectionScore;
+          const noWatermarkDetected =
+            !Number.isFinite(detectionScore) ||
+            detectionScore < MIN_WATERMARK_CORRELATION;
+
+          if (noWatermarkDetected) {
+            const outputMime = this.outputFormat;
+            const outputQuality = outputMime === "image/jpeg" ? 0.92 : undefined;
+            const blob = await new Promise((res) =>
+              canvas.toBlob(res, outputMime, outputQuality)
+            );
+            const processedUrl = URL.createObjectURL(blob);
+
+            resolve({
+              filename: file.name,
+              originalUrl: e.target.result,
+              processedUrl,
+              blob,
+              width: img.naturalWidth,
+              height: img.naturalHeight,
+              maskSize: null,
+              margin: null,
+              outputMime,
+              detectionScore,
+              noWatermark: true,
+              error: null,
+            });
+            return;
+          }
+
           const mask = this.loadedMasks[watermarkConfig.maskKey || watermarkConfig.size];
           if (!mask) {
             throw new Error(
@@ -574,12 +605,14 @@ class ClearNano {
       candidates.push(candidate);
     }
 
-    if (candidates.length === 0) return defaultConfig;
-    if (candidates.length === 1) return candidates[0];
+    if (candidates.length === 0) {
+      return { ...defaultConfig, detectionScore: null };
+    }
 
     const PRIORITY_BIAS = 0.03;
-    let bestConfig = candidates[0];
+    let bestConfig = null;
     let bestEffectiveScore = -Infinity;
+    let bestScore = null;
 
     for (const candidate of candidates) {
       const mask = this.loadedMasks[candidate.maskKey];
@@ -595,11 +628,12 @@ class ClearNano {
 
       if (effectiveScore > bestEffectiveScore) {
         bestEffectiveScore = effectiveScore;
-        bestConfig = candidate;
+        bestConfig = { ...candidate, detectionScore: score };
+        bestScore = score;
       }
     }
 
-    return bestConfig;
+    return bestConfig || { ...defaultConfig, detectionScore: bestScore };
   }
 
   /**
@@ -738,12 +772,22 @@ class ClearNano {
                       !isError
                         ? `
                         <span>${result.width} × ${result.height}</span>
+                        ${
+                          result.noWatermark
+                            ? `
+                        <span class="result-status">
+                            未偵測到浮水印，已保留原圖
+                        </span>
+                    `
+                            : `
                         <span class="result-status success">
                             <svg viewBox="0 0 24 24" fill="none" width="14" height="14" xmlns="http://www.w3.org/2000/svg">
                                 <path d="M20 6L9 17L4 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                             </svg>
                             ${result.maskSize}px / ${result.margin}px margin
                         </span>
+                    `
+                        }
                     `
                         : `
                         <span class="result-status error">
